@@ -334,6 +334,7 @@ cdef class PureMarketMakingStrategy(StrategyBase):
     def get_price(self) -> float:
         if self._asset_price_delegate is not None:
             price_provider = self._asset_price_delegate
+            return price_provider.get_mid_price()
         else:
             price_provider = self._market_info
         if self._price_type is PriceType.LastOwnTrade:
