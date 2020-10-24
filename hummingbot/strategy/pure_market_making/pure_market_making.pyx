@@ -36,6 +36,7 @@ from .asset_price_delegate import AssetPriceDelegate
 from .inventory_skew_calculator cimport c_calculate_bid_ask_ratios_from_base_asset_ratio
 from .inventory_skew_calculator import calculate_total_order_size
 from .order_book_asset_price_delegate cimport OrderBookAssetPriceDelegate
+from .api_asset_price_delegate cimport APIAssetPriceDelegate
 
 
 NaN = float("nan")
@@ -334,6 +335,7 @@ cdef class PureMarketMakingStrategy(StrategyBase):
     def get_price(self) -> float:
         if self._asset_price_delegate is not None:
             price_provider = self._asset_price_delegate
+            return price_provider.get_mid_price()
         else:
             price_provider = self._market_info
         if self._price_type is PriceType.LastOwnTrade:
@@ -537,6 +539,8 @@ cdef class PureMarketMakingStrategy(StrategyBase):
             ref_price = float("nan")
             if market == self._market_info.market and self._asset_price_delegate is None:
                 ref_price = self.get_price()
+            elif type(self._asset_price_delegate) is APIAssetPriceDelegate:
+                ref_price = self._asset_price_delegate.get_mid_price()
             elif market == self._asset_price_delegate.market and self._price_type is not PriceType.LastOwnTrade:
                 ref_price = self._asset_price_delegate.get_price_by_type(self._price_type)
             markets_data.append([
