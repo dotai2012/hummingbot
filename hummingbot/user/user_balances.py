@@ -1,9 +1,11 @@
-from hummingbot.core.utils.market_mid_price import get_mid_price
-from hummingbot.client.settings import CONNECTOR_SETTINGS, ETH_WALLET_CONNECTORS
+from hummingbot.core.utils.market_price import get_mid_price
+from hummingbot.client.settings import CONNECTOR_SETTINGS
 from hummingbot.client.config.security import Security
-from hummingbot.client.config.config_helpers import get_connector_class
+from hummingbot.client.config.config_helpers import get_connector_class, get_eth_wallet_private_key
 from hummingbot.core.utils.async_utils import safe_gather
 from hummingbot.client.config.global_config_map import global_config_map
+from hummingbot.connector.connector.balancer.balancer_connector import BalancerConnector
+from hummingbot.client.settings import ethereum_required_trading_pairs
 from typing import Optional, Dict, List
 from decimal import Decimal
 
@@ -16,10 +18,11 @@ class UserBalances:
     @staticmethod
     def connect_market(exchange, **api_details):
         connector = None
-        if exchange not in ETH_WALLET_CONNECTORS:
+        conn_setting = CONNECTOR_SETTINGS[exchange]
+        if not conn_setting.use_ethereum_wallet:
             connector_class = get_connector_class(exchange)
-            connector = connector_class(**api_details)
-
+            init_params = conn_setting.conn_init_parameters(api_details)
+            connector = connector_class(**init_params)
         return connector
 
     # return error message if the _update_balances fails
@@ -73,7 +76,9 @@ class UserBalances:
         tasks = []
         # Update user balances, except connectors that use Ethereum wallet.
         if len(exchanges) == 0:
-            exchanges = [cs.name for cs in CONNECTOR_SETTINGS.values() if not cs.use_ethereum_wallet]
+            exchanges = [cs.name for cs in CONNECTOR_SETTINGS.values()]
+        exchanges = [cs.name for cs in CONNECTOR_SETTINGS.values() if not cs.use_ethereum_wallet
+                     and cs.name in exchanges]
         if reconnect:
             self._markets.clear()
         for exchange in exchanges:
@@ -84,6 +89,9 @@ class UserBalances:
     async def all_balances_all_exchanges(self) -> Dict[str, Dict[str, Decimal]]:
         await self.update_exchanges()
         return {k: v.get_all_balances() for k, v in sorted(self._markets.items(), key=lambda x: x[0])}
+
+    def all_avai_balances_all_exchanges(self) -> Dict[str, Dict[str, Decimal]]:
+        return {k: v.available_balances for k, v in sorted(self._markets.items(), key=lambda x: x[0])}
 
     async def balances(self, exchange, *symbols) -> Dict[str, Decimal]:
         if await self.update_exchange_balance(exchange) is None:
@@ -102,6 +110,17 @@ class UserBalances:
         balance = web3.eth.getBalance(ethereum_wallet)
         balance = web3.fromWei(balance, "ether")
         return balance
+
+    @staticmethod
+    async def eth_n_erc20_balances() -> Dict[str, Decimal]:
+        ethereum_rpc_url = global_config_map.get("ethereum_rpc_url").value
+        # Todo: Use generic ERC20 balance update
+        connector = BalancerConnector(ethereum_required_trading_pairs(),
+                                      get_eth_wallet_private_key(),
+                                      ethereum_rpc_url,
+                                      True)
+        await connector._update_balances()
+        return connector.get_all_balances()
 
     @staticmethod
     def validate_ethereum_wallet() -> Optional[str]:

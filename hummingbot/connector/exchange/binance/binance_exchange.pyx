@@ -26,6 +26,7 @@ from typing import (
 
 import conf
 from hummingbot.core.utils.asyncio_throttle import Throttler
+from hummingbot.core.utils import async_ttl_cache
 from hummingbot.core.utils.async_call_scheduler import AsyncCallScheduler
 from hummingbot.core.clock cimport Clock
 from hummingbot.core.data_type.limit_order import LimitOrder
@@ -64,7 +65,8 @@ from .binance_in_flight_order import BinanceInFlightOrder
 from .binance_utils import (
     convert_from_exchange_trading_pair,
     convert_to_exchange_trading_pair)
-
+from hummingbot.core.data_type.common import OpenOrder
+from hummingbot.core.data_type.trade import Trade
 s_logger = None
 s_decimal_0 = Decimal(0)
 s_decimal_NaN = Decimal("nan")
@@ -125,15 +127,15 @@ cdef class BinanceExchange(ExchangeBase):
                  binance_api_secret: str,
                  trading_pairs: Optional[List[str]] = None,
                  trading_required: bool = True,
-                 **dummy
+                 domain="com"
                  ):
-
+        self._domain = domain
         self.monkey_patch_binance_time()
         super().__init__()
         self._trading_required = trading_required
-        self._order_book_tracker = BinanceOrderBookTracker(trading_pairs=trading_pairs)
-        self._binance_client = BinanceClient(binance_api_key, binance_api_secret)
-        self._user_stream_tracker = BinanceUserStreamTracker(binance_client=self._binance_client)
+        self._order_book_tracker = BinanceOrderBookTracker(trading_pairs=trading_pairs, domain=domain)
+        self._binance_client = BinanceClient(binance_api_key, binance_api_secret, tld=domain)
+        self._user_stream_tracker = BinanceUserStreamTracker(binance_client=self._binance_client, domain=domain)
         self._ev_loop = asyncio.get_event_loop()
         self._poll_notifier = asyncio.Event()
         self._last_timestamp = 0
@@ -152,7 +154,10 @@ cdef class BinanceExchange(ExchangeBase):
 
     @property
     def name(self) -> str:
-        return "binance"
+        if self._domain == "com":
+            return "binance"
+        else:
+            return f"binance_{self._domain}"
 
     @property
     def order_books(self) -> Dict[str, OrderBook]:
@@ -311,7 +316,7 @@ cdef class BinanceExchange(ExchangeBase):
         return TradeFee(percent=maker_trade_fee if order_type.is_limit_type() else taker_trade_fee)
         """
         is_maker = order_type is OrderType.LIMIT_MAKER
-        return estimate_fee("binance", is_maker)
+        return estimate_fee(self.name, is_maker)
 
     async def _update_trading_rules(self):
         cdef:
@@ -421,13 +426,11 @@ cdef class BinanceExchange(ExchangeBase):
                                                      order_type,
                                                      Decimal(trade["price"]),
                                                      Decimal(trade["qty"]),
-                                                     self.c_get_fee(
-                                                         tracked_order.base_asset,
-                                                         tracked_order.quote_asset,
-                                                         order_type,
-                                                         tracked_order.trade_type,
-                                                         Decimal(trade["price"]),
-                                                         Decimal(trade["qty"])),
+                                                     TradeFee(
+                                                         percent=Decimal(0.0),
+                                                         flat_fees=[(trade["commissionAsset"],
+                                                                     Decimal(trade["commission"]))]
+                                                     ),
                                                      exchange_trade_id=trade["id"]
                                                  ))
 
@@ -592,14 +595,6 @@ cdef class BinanceExchange(ExchangeBase):
                     if execution_type == "TRADE":
                         order_filled_event = OrderFilledEvent.order_filled_event_from_binance_execution_report(event_message)
                         order_filled_event = order_filled_event._replace(trading_pair=convert_from_exchange_trading_pair(order_filled_event.trading_pair))
-                        order_filled_event = order_filled_event._replace(trade_fee=self.c_get_fee(
-                            tracked_order.base_asset,
-                            tracked_order.quote_asset,
-                            BinanceExchange.to_hb_order_type(event_message["o"]),
-                            TradeType.BUY if event_message["S"] == "BUY" else TradeType.SELL,
-                            Decimal(event_message["l"]),
-                            Decimal(event_message["L"])
-                        ))
                         self.c_trigger_event(self.MARKET_ORDER_FILLED_EVENT_TAG, order_filled_event)
 
                     if tracked_order.is_done:
@@ -693,7 +688,6 @@ cdef class BinanceExchange(ExchangeBase):
             try:
                 await safe_gather(
                     self._update_trading_rules(),
-                    self._update_trade_fees()
                 )
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
@@ -710,7 +704,6 @@ cdef class BinanceExchange(ExchangeBase):
             "order_books_initialized": self._order_book_tracker.ready,
             "account_balance": len(self._account_balances) > 0 if self._trading_required else True,
             "trading_rule_initialized": len(self._trading_rules) > 0,
-            "trade_fees_initialized": len(self._trade_fees) > 0
         }
 
     @property
@@ -1041,3 +1034,41 @@ cdef class BinanceExchange(ExchangeBase):
 
     def get_order_book(self, trading_pair: str) -> OrderBook:
         return self.c_get_order_book(trading_pair)
+
+    async def get_open_orders(self) -> List[OpenOrder]:
+        orders = await self.query_api(self._binance_client.get_open_orders)
+        ret_val = []
+        for order in orders:
+            if BROKER_ID not in order["clientOrderId"]:
+                continue
+            ret_val.append(
+                OpenOrder(
+                    client_order_id=order["clientOrderId"],
+                    trading_pair=convert_from_exchange_trading_pair(order["symbol"]),
+                    price=Decimal(str(order["price"])),
+                    amount=Decimal(str(order["origQty"])),
+                    executed_amount=Decimal(str(order["executedQty"])),
+                    status=order["status"],
+                    order_type=self.to_hb_order_type(order["type"]),
+                    is_buy=True if order["side"].lower() == "buy" else False,
+                    time=int(order["time"]),
+                    exchange_order_id=order["orderId"]
+                )
+            )
+        return ret_val
+
+    @async_ttl_cache(ttl=30, maxsize=1000)
+    async def get_all_my_trades(self, trading_pair: str) -> List[Trade]:
+        # Ths Binance API call rate is 5, so we cache to make sure we don't go over rate limit
+        trades = await self.query_api(self._binance_client.get_my_trades,
+                                      symbol=convert_to_exchange_trading_pair(trading_pair))
+        from hummingbot.connector.exchange.binance.binance_helper import format_trades
+        return format_trades(trades)
+
+    async def get_my_trades(self, trading_pair: str, days_ago: float) -> List[Trade]:
+        trades = await self.get_all_my_trades(trading_pair)
+        from hummingbot.connector.exchange.binance.binance_helper import get_utc_timestamp
+        if days_ago is not None:
+            time = get_utc_timestamp(days_ago) * 1e3
+            trades = [t for t in trades if t.timestamp > time]
+        return trades

@@ -52,6 +52,7 @@ cdef class KucoinOrderBook(OrderBook):
             msg.update(metadata)
         return KucoinOrderBookMessage(OrderBookMessageType.DIFF, {
             "trading_pair": msg["data"]["symbol"],
+            "first_update_id": msg["data"]["sequenceStart"],
             "update_id": msg["data"]["sequenceEnd"],
             "bids": msg["data"]["changes"]["bids"],
             "asks": msg["data"]["changes"]["asks"]
@@ -64,10 +65,10 @@ cdef class KucoinOrderBook(OrderBook):
         if metadata:
             msg.update(metadata)
         return OrderBookMessage(OrderBookMessageType.SNAPSHOT, {
-            "trading_pair": msg["symbol"],
+            "trading_pair": msg["s"],
             "update_id": int(ts),
-            "bids": msg["data"]["bids"],
-            "asks": msg["data"]["asks"]
+            "bids": msg["bids"],
+            "asks": msg["asks"]
         }, timestamp=record["timestamp"] * 1e-3)
 
     @classmethod
@@ -77,10 +78,11 @@ cdef class KucoinOrderBook(OrderBook):
         if metadata:
             msg.update(metadata)
         return OrderBookMessage(OrderBookMessageType.DIFF, {
-            "trading_pair": msg["symbol"],
+            "trading_pair": msg["s"],
+            "first_update_id": msg.get("first_update_id", ts),
             "update_id": ts,
-            "bids": msg["data"]["bids"],
-            "asks": msg["data"]["asks"]
+            "bids": msg["bids"],
+            "asks": msg["asks"]
         }, timestamp=record["timestamp"] * 1e-3)
 
     @classmethod
@@ -115,14 +117,13 @@ cdef class KucoinOrderBook(OrderBook):
         if metadata:
             msg.update(metadata)
         return OrderBookMessage(OrderBookMessageType.TRADE, {
-            "trading_pair": msg["symbol"],
-            "trade_type": float(TradeType.BUY.value) if msg["side"] == "buy"
-            else float(TradeType.SELL.value),
-            "trade_id": msg["tradeId"],
-            "update_id": msg["sequence"],
+            "trading_pair": msg["s"],
+            "trade_type": msg["trade_type"],
+            "trade_id": msg["trade_id"],
+            "update_id": msg["update_id"],
             "price": msg["price"],
-            "amount": msg["size"]
-        }, timestamp=record.timestamp * 1e-9)
+            "amount": msg["amount"]
+        }, timestamp=record["timestamp"] * 1e-9)
 
     @classmethod
     def trade_message_from_exchange(cls, msg: Dict[str, any], metadata: Optional[Dict] = None):
